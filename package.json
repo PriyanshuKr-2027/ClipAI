@@ -6,11 +6,14 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:remotion": "npx remotion bundle src/remotion/index.js --output dist-remotion",
     "preview": "vite preview",
     "server": "node server/index.js",
     "start": "concurrently \"npm run server\" \"npm run dev\""
   },
   "dependencies": {
+    "@remotion/cli": "^4.0.0",
+    "@remotion/player": "^4.0.0",
     "axios": "^1.6.5",
     "framer-motion": "^10.18.0",
     "immer": "^10.0.3",
@@ -18,6 +21,7 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-router-dom": "^6.21.0",
+    "remotion": "^4.0.0",
     "zustand": "^4.4.7"
   },
   "devDependencies": {

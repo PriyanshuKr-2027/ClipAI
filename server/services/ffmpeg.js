@@ -74,18 +74,50 @@ function getVideoInfo(videoPath) {
 }
 
 /**
- * Extract 16kHz mono audio track from a video file.
+ * Extract 16kHz mono PCM WAV audio track from a video file.
  */
 function extractAudio(videoPath, outputPath) {
   return new Promise((resolve, reject) => {
     ffmpeg(videoPath)
       .noVideo()
-      .audioCodec('libmp3lame')
+      .audioCodec('pcm_s16le')
       .audioFrequency(16000)
       .audioChannels(1)
       .output(outputPath)
       .on('end', () => resolve(outputPath))
       .on('error', (err) => reject(err))
+      .run();
+  });
+}
+
+/**
+ * Overlay a transparent caption video on top of a base video and keep base audio.
+ */
+function composite(baseVideoPath, captionVideoPath, outputPath, onProgress) {
+  return new Promise((resolve, reject) => {
+    ffmpeg()
+      .input(baseVideoPath)
+      .input(captionVideoPath)
+      .complexFilter('[0:v][1:v]overlay=0:0[v]')
+      .outputOptions('-map [v]')
+      .outputOptions('-map 0:a?')
+      .outputOptions('-c:v libx264')
+      .outputOptions('-c:a copy')
+      .outputOptions('-preset superfast')
+      .output(outputPath)
+      .on('start', (commandLine) => {
+        console.log('Spawned FFmpeg composite: ' + commandLine);
+      })
+      .on('progress', (progress) => {
+        if (onProgress && progress.percent) {
+          onProgress(Math.round(progress.percent));
+        }
+      })
+      .on('end', () => resolve(outputPath))
+      .on('error', (err) => {
+        console.error('FFmpeg composite Error:', err.message);
+        reject(err);
+      })
       .run();
   });
 }
@@ -234,7 +266,7 @@ function burnCaptions(videoPath, assPath, outputPath, crf = 23, resolution = 'or
 /**
  * Re-encode a video with quality (CRF) and resolution settings, without burning subtitles.
  */
-function reencode(videoPath, outputPath, crf = 23, resolution = 'original', onProgress) {
+function reencode(videoPath, outputPath, crf = 23, resolution = 'original', onProgress, audioPath = null) {
   return new Promise((resolve, reject) => {
     const videoFilters = [];
 
@@ -249,11 +281,19 @@ function reencode(videoPath, outputPath, crf = 23, resolution = 'original', onPr
       }
     }
 
-    let ff = ffmpeg(videoPath)
-      .videoCodec('libx264')
+    let ff = ffmpeg(videoPath);
+    if (audioPath) {
+      ff = ff.input(audioPath);
+    }
+
+    ff = ff.videoCodec('libx264')
       .audioCodec('aac')
       .outputOptions(`-crf ${crf}`)
       .outputOptions('-preset superfast');
+
+    if (audioPath) {
+      ff = ff.outputOptions('-map 0:v').outputOptions('-map 1:a');
+    }
 
     if (videoFilters.length > 0) {
       ff = ff.videoFilters(videoFilters);
@@ -287,6 +327,7 @@ module.exports = {
   trim,
   speed,
   crop,
+  composite,
   burnCaptions,
   reencode
 };

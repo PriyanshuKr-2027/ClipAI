@@ -123,6 +123,31 @@ router.get('/list', (req, res) => {
   }
 });
 
+// POST /api/files/save-json
+router.post('/save-json', (req, res) => {
+  try {
+    const { data, prefix = 'data' } = req.body;
+    if (data === undefined) {
+      return res.status(400).json({ error: 'data is required' });
+    }
+
+    const safePrefix = String(prefix).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const filename = `${safePrefix}_${uuidv4()}.json`;
+    const filePath = path.join(tempDir, filename);
+
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+
+    res.json({
+      filePath,
+      filename,
+      url: `http://localhost:3001/temp/${filename}`
+    });
+  } catch (err) {
+    console.error('Save JSON error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE /api/files/cleanup
 router.delete('/cleanup', (req, res) => {
   try {

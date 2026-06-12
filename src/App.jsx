@@ -6,6 +6,7 @@ import Editor from './screens/Editor';
 import CaptionEditor from './screens/CaptionEditor';
 import ClipsReview from './screens/ClipsReview';
 import TransitionClone from './screens/TransitionClone';
+import Export from './screens/Export';
 
 function App() {
   return (
@@ -18,6 +19,7 @@ function App() {
           <Route path="/captions" element={<CaptionEditor />} />
           <Route path="/clips" element={<ClipsReview />} />
           <Route path="/transitions" element={<TransitionClone />} />
+          <Route path="/export" element={<Export />} />
         </Routes>
       </div>
     </BrowserRouter>

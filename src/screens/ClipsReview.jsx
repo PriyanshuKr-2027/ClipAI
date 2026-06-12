@@ -3,10 +3,12 @@ import { useNavigate } from 'react-router-dom';
 import { useEditorStore } from '../store/editorStore';
 import { generateClips } from '../services/clipDetector';
 import CaptionOverlay from '../components/CaptionOverlay';
-import ExportSheet from '../components/ExportSheet';
+import ScoreCard from '../components/ScoreCard';
+import RemotionPreview from '../components/RemotionPreview';
+import * as beatSync from '../services/beatSync';
 import {
   ArrowLeft, Sparkles, RefreshCw, Check, Play, Edit3,
-  ExternalLink, X, Eye, Film, Scissors, CheckSquare, Square
+  ExternalLink, X, Eye, Film, Scissors, CheckSquare, Square, Smile
 } from 'lucide-react';
 
 export default function ClipsReview() {
@@ -26,8 +28,28 @@ export default function ClipsReview() {
   // Local component states
   const [activePreviewClip, setActivePreviewClip] = useState(null);
   const [previewTime, setPreviewTime] = useState(0);
-  const [isExporting, setIsExporting] = useState(false);
-  const [exportClipsQueue, setExportClipsQueue] = useState([]);
+  const [beatSyncDiff, setBeatSyncDiff] = useState(null);
+
+  const handleBeatSyncClick = () => {
+    if (!store.beats || store.beats.length === 0) return;
+    const syncedClips = beatSync.generateBeatSyncCuts(store.beats, generatedClips);
+    setBeatSyncDiff(syncedClips);
+  };
+
+  const handleApplyBeatSync = () => {
+    if (!beatSyncDiff) return;
+    store.updateClips(beatSyncDiff);
+    setBeatSyncDiff(null);
+  };
+
+  const handleCancelBeatSync = () => {
+    setBeatSyncDiff(null);
+  };
+
+  const handleExportAllWithRemotion = () => {
+    store.setExportSettings({ useRemotionCaptions: true });
+    triggerSelectedExport();
+  };
 
   // Auto-generate shorts on mount if generatedClips is empty
   useEffect(() => {
@@ -106,21 +128,18 @@ export default function ClipsReview() {
   // Export triggers
   const triggerSingleExport = (clip, e) => {
     if (e) e.stopPropagation();
-    setExportClipsQueue([clip]);
-    setIsExporting(true);
+    navigate('/export', { state: { clips: [clip] } });
   };
 
   const triggerSelectedExport = () => {
     const selectedClips = generatedClips.filter((c) => selectedClipIds.includes(c.id));
     if (selectedClips.length === 0) return;
-    setExportClipsQueue(selectedClips);
-    setIsExporting(true);
+    navigate('/export', { state: { clips: selectedClips } });
   };
 
   const triggerExportAll = () => {
     if (generatedClips.length === 0) return;
-    setExportClipsQueue(generatedClips);
-    setIsExporting(true);
+    navigate('/export', { state: { clips: generatedClips } });
   };
 
   const formatDuration = (secs) => {
@@ -162,25 +181,57 @@ export default function ClipsReview() {
         <div className="flex gap-2 items-center">
           {generatedClips.length > 0 && (
             <>
-              {/* Style Presetter */}
-              <select
-                value={selectedStyle}
-                onChange={(e) => store.setSelectedStyle(e.target.value)}
-                className="glass-input h-8 px-2 text-xs w-32 cursor-pointer"
-              >
-                {['NeonPop', 'HinglishFire', 'BoldDevanagari', 'CleanMinimal', 'ReelBold'].map((preset) => (
-                  <option key={preset} value={preset} className="bg-[#12121a] text-white">
-                    {preset}
-                  </option>
-                ))}
-              </select>
+              {beatSyncDiff ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-orange-400 font-bold uppercase tracking-wider animate-pulse mr-1">
+                    ⚡ Previewing Sync
+                  </span>
+                  <button
+                    onClick={handleApplyBeatSync}
+                    className="h-8 px-4 bg-orange-500 hover:bg-orange-600 text-white font-bold text-xs rounded-full flex items-center justify-center shadow-glow-sm transition-colors"
+                  >
+                    Apply Beat Sync
+                  </button>
+                  <button
+                    onClick={handleCancelBeatSync}
+                    className="h-8 px-4 bg-white/10 hover:bg-white/20 text-white font-semibold text-xs rounded-full flex items-center justify-center transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <>
+                  {/* Beat Sync Trigger */}
+                  {store.beats && store.beats.length > 0 && (
+                    <button
+                      onClick={handleBeatSyncClick}
+                      className="h-8 px-3.5 bg-orange-500/10 border border-orange-500/25 hover:bg-orange-500/20 text-orange-400 font-bold text-xs rounded-full flex items-center gap-1.5 shadow-glow-sm transition-all"
+                    >
+                      ⚡ Beat Sync
+                    </button>
+                  )}
 
-              <button
-                onClick={triggerExportAll}
-                className="h-8 px-4 rounded-full bg-gradient-to-r from-accent to-[#9b7dff] text-white text-xs font-bold shadow-glow-sm hover:opacity-90 transition-opacity"
-              >
-                Export All
-              </button>
+                  {/* Style Presetter */}
+                  <select
+                    value={selectedStyle}
+                    onChange={(e) => store.setSelectedStyle(e.target.value)}
+                    className="glass-input h-8 px-2 text-xs w-32 cursor-pointer"
+                  >
+                    {['NeonPop', 'HinglishFire', 'BoldDevanagari', 'CleanMinimal', 'ReelBold'].map((preset) => (
+                      <option key={preset} value={preset} className="bg-[#12121a] text-white">
+                        {preset}
+                      </option>
+                    ))}
+                  </select>
+
+                  <button
+                    onClick={triggerExportAll}
+                    className="h-8 px-4 rounded-full bg-gradient-to-r from-accent to-[#9b7dff] text-white text-xs font-bold shadow-glow-sm hover:opacity-90 transition-opacity"
+                  >
+                    Export All
+                  </button>
+                </>
+              )}
             </>
           )}
         </div>
@@ -238,6 +289,10 @@ export default function ClipsReview() {
           <div className="p-6 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
             {generatedClips.map((clip) => {
               const isSelected = selectedClipIds.includes(clip.id);
+              const syncedClip = beatSyncDiff ? beatSyncDiff.find(c => c.id === clip.id) : null;
+              const hasStartShift = syncedClip && Math.abs(syncedClip.start - clip.start) > 0.01;
+              const hasEndShift = syncedClip && Math.abs(syncedClip.end - clip.end) > 0.01;
+              const hasShifted = hasStartShift || hasEndShift;
 
               return (
                 <div
@@ -266,15 +321,68 @@ export default function ClipsReview() {
                       {isSelected ? <CheckSquare size={13} /> : <Square size={13} />}
                     </button>
 
-                    {/* Viral score badge */}
-                    <div
-                      className={`absolute top-3 left-3 px-2 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1 shadow z-20 ${getScoreBadgeClass(
-                        clip.score
-                      )}`}
-                    >
-                      <Sparkles size={9} />
-                      <span>{clip.score}</span>
+                    {/* Face Detected Icon */}
+                    {clip.faceScore > 0.8 && (
+                      <div 
+                        className="absolute top-3 right-11 w-6 h-6 rounded-lg bg-black/60 border border-white/20 flex items-center justify-center text-[#00f5c4] z-20" 
+                        title="Face Detected"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <Smile size={13} />
+                      </div>
+                    )}
+
+                    {/* Score Card Badge */}
+                    <div className="absolute top-3 left-3 z-20">
+                      <ScoreCard score={clip.score} size="sm" />
                     </div>
+
+                    {/* Transcribed Hover Badge */}
+                    {store.transcriptionBackend && (
+                      <div className="absolute top-12 left-3 z-20 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none">
+                        <div className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider border ${
+                          store.transcriptionBackend.toLowerCase() === 'groq'
+                            ? 'bg-green-500/20 border-green-500/30 text-green-400'
+                            : 'bg-blue-500/20 border-blue-500/30 text-blue-400'
+                        }`}>
+                          {store.transcriptionBackend.toLowerCase() === 'groq' ? 'Groq Whisper' : 'Local Whisper'}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Beat Sync Diff Overlay */}
+                    {beatSyncDiff && syncedClip && (
+                      <div className="absolute inset-0 bg-black/90 backdrop-blur-sm z-30 flex flex-col justify-center p-4 text-[10px] font-mono text-white/95 leading-relaxed" onClick={(e) => e.stopPropagation()}>
+                        <p className="text-orange-400 font-bold mb-2 flex items-center gap-1.5 uppercase tracking-wide text-xs">
+                          <span>⚡</span> {hasShifted ? 'Timing Shifted' : 'Locked to Beat'}
+                        </p>
+                        <div className="flex flex-col gap-1.5 mt-1 border-t border-white/5 pt-2">
+                          <div className="flex justify-between items-center">
+                            <span className="text-white/40">Start:</span>
+                            <span>
+                              {clip.start.toFixed(2)}s
+                              {hasStartShift && <span className="text-orange-400 font-bold ml-1.5">→ {syncedClip.start.toFixed(2)}s</span>}
+                            </span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span className="text-white/40">End:</span>
+                            <span>
+                              {clip.end.toFixed(2)}s
+                              {hasEndShift && <span className="text-orange-400 font-bold ml-1.5">→ {syncedClip.end.toFixed(2)}s</span>}
+                            </span>
+                          </div>
+                          <div className="flex justify-between items-center border-t border-white/5 pt-1.5 mt-1">
+                            <span className="text-white/40">Duration:</span>
+                            <span>
+                              {clip.duration.toFixed(1)}s
+                              {Math.abs(syncedClip.duration - clip.duration) > 0.05 && (
+                                <span className="text-orange-400 font-bold ml-1.5">→ {syncedClip.duration.toFixed(1)}s</span>
+                              )}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
 
                     {/* Aspect Ratio Selector */}
                     <div className="absolute top-3 left-16 z-20">
@@ -358,13 +466,23 @@ export default function ClipsReview() {
             </button>
           </div>
 
-          <button
-            onClick={triggerSelectedExport}
-            disabled={selectedClipIds.length === 0}
-            className="h-9 px-6 rounded-full bg-gradient-to-r from-accent to-accent-teal text-white text-xs font-bold shadow-glow-sm hover:opacity-90 transition-opacity disabled:opacity-40 disabled:pointer-events-none"
-          >
-            Export Selected ({selectedClipIds.length})
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={handleExportAllWithRemotion}
+              disabled={selectedClipIds.length === 0}
+              className="h-9 px-6 rounded-full bg-gradient-to-r from-[#7c5cfc] to-[#9b7dff] text-white text-xs font-bold shadow-glow-sm hover:opacity-90 transition-opacity disabled:opacity-40 disabled:pointer-events-none"
+            >
+              Export All with Remotion
+            </button>
+
+            <button
+              onClick={triggerSelectedExport}
+              disabled={selectedClipIds.length === 0}
+              className="h-9 px-6 rounded-full bg-gradient-to-r from-accent to-accent-teal text-white text-xs font-bold shadow-glow-sm hover:opacity-90 transition-opacity disabled:opacity-40 disabled:pointer-events-none"
+            >
+              Export Selected ({selectedClipIds.length})
+            </button>
+          </div>
         </div>
       )}
 
@@ -424,23 +542,24 @@ export default function ClipsReview() {
                 autoPlay
                 loop
                 onTimeUpdate={(e) => setPreviewTime(e.target.currentTime)}
-                className="w-full h-full object-cover"
+                className="w-full h-full object-cover absolute inset-0"
               />
 
-              {/* Subtitle Overlay inside preview */}
-              <CaptionOverlay
-                captionGroups={activePreviewClip.words ? [
-                  {
-                    id: 'preview_sub',
-                    startTime: 0,
-                    endTime: activePreviewClip.duration,
-                    text: activePreviewClip.title,
-                    words: activePreviewClip.words
-                  }
-                ] : []}
-                currentTime={previewTime}
-                stylePreset={selectedStyle}
-              />
+              {/* Remotion Overlay preview synced to currentTime */}
+              <div className="absolute inset-0 z-10 pointer-events-none flex items-center justify-center">
+                <RemotionPreview
+                  words={activePreviewClip.words || []}
+                  selectedStyle={selectedStyle || activePreviewClip.stylePreset || 'NeonPop'}
+                  currentTime={previewTime}
+                  duration={activePreviewClip.duration || 5}
+                  videoWidth={1080}
+                  videoHeight={1920}
+                  width="100%"
+                  height="100%"
+                  showControls={false}
+                  loop={true}
+                />
+              </div>
             </div>
 
             {/* Modal actions */}
@@ -470,13 +589,6 @@ export default function ClipsReview() {
         </div>
       )}
 
-      {/* EXPORT SHEET OVERLAY */}
-      <ExportSheet
-        clips={exportClipsQueue}
-        isOpen={isExporting}
-        onClose={() => setIsExporting(false)}
-        onComplete={() => setIsExporting(false)}
-      />
     </div>
   );
 }

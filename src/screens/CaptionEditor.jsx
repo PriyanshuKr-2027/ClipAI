@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useEditorStore } from '../store/editorStore';
-import CaptionOverlay from '../components/CaptionOverlay';
+import RemotionPreview from '../components/RemotionPreview';
+import StylePicker from '../components/StylePicker';
 import { 
   ArrowLeft, Play, Pause, ChevronLeft, ChevronRight, 
   Trash2, Plus, Sparkles, RefreshCw, AlertTriangle, Check
@@ -31,6 +32,9 @@ export default function CaptionEditor() {
   const [confirmReset, setConfirmReset] = useState(false);
   const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
   const [confirmReCaption, setConfirmReCaption] = useState(false);
+  const [targetLang, setTargetLang] = useState('hi');
+  const [isTranslatingLang, setIsTranslatingLang] = useState(false);
+  const [transcribeLanguage, setTranscribeLanguage] = useState(store.language || 'auto');
 
   // Auto-build caption groups if words exist but captionGroups is empty
   useEffect(() => {
@@ -66,8 +70,26 @@ export default function CaptionEditor() {
     store.setIsPlaying(!isPlaying);
   };
 
-  // Find active caption group
-  const activeGroup = captionGroups.find(
+  // Map each word inside captionGroups to its translated version if showTranslated is true
+  const displayGroups = React.useMemo(() => {
+    if (!store.showTranslated || !store.translatedWords || store.translatedWords.length === 0) {
+      return captionGroups;
+    }
+    return captionGroups.map((group) => {
+      const mappedWords = (group.words || []).map((w) => {
+        const match = store.translatedWords.find(tw => Math.abs(tw.start - w.start) < 0.01);
+        return match ? { ...w, word: match.translated || match.word } : w;
+      });
+      return {
+        ...group,
+        text: mappedWords.map(w => w.word).join(' '),
+        words: mappedWords
+      };
+    });
+  }, [captionGroups, store.showTranslated, store.translatedWords]);
+
+  // Find active caption group using displayGroups
+  const activeGroup = displayGroups.find(
     (g) => currentTime >= g.startTime && currentTime <= g.endTime
   );
 
@@ -81,19 +103,50 @@ export default function CaptionEditor() {
     }
   }, [activeGroup?.id]);
 
+  // Translate call helper
+  const handleTranslate = async () => {
+    if (words.length === 0) return;
+    setIsTranslatingLang(true);
+    try {
+      const wordsJsonPath = await api.saveWordsJson(words);
+      const result = await api.translateWords(wordsJsonPath, targetLang, store.language || 'auto');
+      store.setTranslatedWords(result.translatedWords || []);
+      store.setShowTranslated(true);
+    } catch (err) {
+      console.error(err);
+      alert('Translation failed: ' + err.message);
+    } finally {
+      setIsTranslatingLang(false);
+    }
+  };
+
   // Core transcription runner (shared by first-run + Re-Caption)
   const runTranscription = async () => {
     setIsTranscribing(true);
     setTranscribeStep('Extracting audio track...');
     try {
-      const { audioUrl } = await api.extractAudio(store.videoPath);
+      const { audioPath, audioUrl } = await api.extractAudio(store.videoPath);
       setTranscribeStep('Transcribing with Whisper AI...');
-      const result = await groq.transcribeAudio(audioUrl);
-      
+      const audioSrcUrl = audioUrl || `http://localhost:3001/temp/${audioPath.split(/[\\/]/).pop()}`;
+      const result = await groq.transcribeAudio(audioSrcUrl);
+
+      let finalWords = result.words;
+      let detectedLang = transcribeLanguage !== 'auto' ? transcribeLanguage : groq.detectLanguage(result.text);
+
+      if (detectedLang === 'ur' || result.language === 'ur') {
+        setTranscribeStep('Translating Urdu script to Hindi...');
+        try {
+          const wordsJsonPath = await api.saveWordsJson(result.words);
+          const transResult = await api.translateWords(wordsJsonPath, 'hi', 'ur');
+          finalWords = transResult.translatedWords || result.words;
+          detectedLang = 'hi';
+        } catch (err) {
+          console.error("Auto Urdu-to-Hindi translation failed, falling back:", err);
+        }
+      }
+
       setTranscribeStep('Building caption blocks...');
-      store.setWords(result.words);
-      
-      const detectedLang = groq.detectLanguage(result.text);
+      store.setWords(finalWords);
       store.setLanguage(detectedLang);
 
       const preset = detectedLang === 'hi' ? 'BoldDevanagari'
@@ -156,26 +209,26 @@ export default function CaptionEditor() {
 
   // Save changes and return to editor
   const handleSaveAndReturn = () => {
-    // Sync store.captionBlocks from captionGroups
-    useEditorStore.setState({ captionBlocks: JSON.parse(JSON.stringify(captionGroups)) });
+    // Sync store.captionBlocks from displayGroups (captures translated captions if active)
+    useEditorStore.setState({ captionBlocks: JSON.parse(JSON.stringify(displayGroups)) });
     store.saveProject();
     navigate('/editor');
   };
 
   const navigateCaption = (direction) => {
-    if (captionGroups.length === 0) return;
+    if (displayGroups.length === 0) return;
     
     let nextIndex = 0;
     if (activeGroup) {
-      const currentIndex = captionGroups.findIndex((g) => g.id === activeGroup.id);
+      const currentIndex = displayGroups.findIndex((g) => g.id === activeGroup.id);
       if (direction === 'prev') {
         nextIndex = Math.max(0, currentIndex - 1);
       } else {
-        nextIndex = Math.min(captionGroups.length - 1, currentIndex + 1);
+        nextIndex = Math.min(displayGroups.length - 1, currentIndex + 1);
       }
     }
     
-    const targetGroup = captionGroups[nextIndex];
+    const targetGroup = displayGroups[nextIndex];
     if (targetGroup) {
       store.setCurrentTime(targetGroup.startTime);
       if (videoRef.current) videoRef.current.currentTime = targetGroup.startTime;
@@ -206,6 +259,16 @@ export default function CaptionEditor() {
           <span className="text-[11px] text-white/40 max-w-[120px] truncate glass-card px-2 py-0.5 rounded">
             {projectName}
           </span>
+          {store.transcriptionBackend === 'groq' && (
+            <span className="text-[10px] bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full font-bold">
+              Groq Whisper
+            </span>
+          )}
+          {(store.transcriptionBackend === 'faster-whisper' || store.transcriptionBackend === 'faster_whisper' || store.transcriptionBackend === 'local') && (
+            <span className="text-[10px] bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded-full font-bold">
+              Local Whisper
+            </span>
+          )}
         </div>
 
         <div className="flex gap-2 items-center">
@@ -264,11 +327,14 @@ export default function CaptionEditor() {
                   loop
                 />
                 
-                {/* Visual rendering of Subtitle overlay */}
-                <CaptionOverlay
-                  captionGroups={captionGroups}
+                <RemotionPreview
+                  words={displayGroups.flatMap(g => g.words || [])}
+                  selectedStyle={selectedStyle}
                   currentTime={currentTime}
-                  stylePreset={selectedStyle}
+                  duration={store.videoInfo?.duration || 60}
+                  width="100%"
+                  height="100%"
+                  showControls={false}
                 />
               </>
             ) : (
@@ -279,20 +345,7 @@ export default function CaptionEditor() {
           {/* Subtitle Style Controller */}
           <div className="glass-panel p-3 w-full max-w-[230px] flex flex-col gap-3">
             {/* Style Preset Selector */}
-            <div className="flex flex-col gap-1">
-              <label className="text-[10px] text-white/40 uppercase font-semibold">Preset Theme</label>
-              <select
-                value={selectedStyle}
-                onChange={(e) => store.setSelectedStyle(e.target.value)}
-                className="glass-input h-8 px-2 text-xs w-full cursor-pointer"
-              >
-                {['NeonPop', 'HinglishFire', 'BoldDevanagari', 'CleanMinimal', 'ReelBold'].map((preset) => (
-                  <option key={preset} value={preset} className="bg-[#12121a] text-white">
-                    {preset}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <StylePicker />
 
             {/* Navigation control row */}
             <div className="flex items-center justify-between border-t border-b border-white/5 py-1.5">
@@ -374,16 +427,72 @@ export default function CaptionEditor() {
                 })}
               </div>
             </div>
+
+            {/* Translation Panel */}
+            <div className="flex flex-col gap-1.5 border-t border-white/5 pt-3 mt-1">
+              <span className="text-[10px] text-white/40 uppercase font-semibold">Translate Captions</span>
+              <div className="flex gap-1.5">
+                <select
+                  value={targetLang}
+                  onChange={(e) => setTargetLang(e.target.value)}
+                  className="glass-input h-8 px-2 text-xs flex-1 cursor-pointer"
+                >
+                  <option value="en" className="bg-[#12121a] text-white">English</option>
+                  <option value="hi" className="bg-[#12121a] text-white">Hindi (हिन्दी)</option>
+                  <option value="ta" className="bg-[#12121a] text-white">Tamil (தமிழ்)</option>
+                  <option value="te" className="bg-[#12121a] text-white">Telugu (తెలుగు)</option>
+                  <option value="pa" className="bg-[#12121a] text-white">Punjabi (ਪੰਜਾਬੀ)</option>
+                  <option value="mr" className="bg-[#12121a] text-white">Marathi (ਮਰਾठी)</option>
+                </select>
+
+                <button
+                  onClick={handleTranslate}
+                  disabled={isTranslatingLang || words.length === 0}
+                  className="h-8 px-3 rounded-lg bg-accent hover:opacity-90 disabled:opacity-40 text-[11px] font-bold text-white transition-opacity flex items-center justify-center gap-1"
+                >
+                  {isTranslatingLang ? (
+                    <RefreshCw size={12} className="animate-spin" />
+                  ) : (
+                    <span>Translate</span>
+                  )}
+                </button>
+              </div>
+
+              {store.translatedWords && store.translatedWords.length > 0 && (
+                <button
+                  onClick={() => store.setShowTranslated(!store.showTranslated)}
+                  className={`h-7 w-full rounded-lg text-[10px] font-bold border transition-all ${
+                    store.showTranslated
+                      ? 'bg-[#ff4400]/10 border-[#ff4400]/30 text-[#ff4400]'
+                      : 'bg-white/5 border-white/10 text-white/60 hover:text-white'
+                  }`}
+                >
+                  {store.showTranslated ? '← Show Original' : '→ Show Translated'}
+                </button>
+              )}
+            </div>
           </div>
 
           {/* Prominent Generate Subtitles button (If transcript empty) */}
           {words.length === 0 && !isTranscribing && (
-            <button
-              onClick={handleGenerateCaptions}
-              className="h-11 px-6 rounded-2xl bg-gradient-to-r from-accent to-[#00f5c4] text-white font-bold text-sm flex items-center justify-center gap-2 shadow-glow hover:opacity-90 transition-opacity"
-            >
-              <Sparkles size={16} /> Auto-Generate AI Captions
-            </button>
+            <div className="flex flex-col gap-2.5 items-center bg-[#0d0d12]/60 border border-white/10 rounded-2xl p-4 w-full max-w-sm shadow-glow-sm">
+              <span className="text-[10px] text-white/50 uppercase font-semibold">Select Video Language</span>
+              <select
+                value={transcribeLanguage}
+                onChange={(e) => setTranscribeLanguage(e.target.value)}
+                className="w-full bg-[#12121a] border border-white/10 rounded-lg py-1.5 px-2 text-xs text-white/70 outline-none focus:border-[#00f5c4]/60 cursor-pointer"
+              >
+                <option value="auto">Auto Detect Language</option>
+                <option value="hi">Hindi (देवनागरी)</option>
+                <option value="en">English</option>
+              </select>
+              <button
+                onClick={handleGenerateCaptions}
+                className="h-10 w-full rounded-xl bg-gradient-to-r from-accent to-[#00f5c4] text-white font-bold text-xs flex items-center justify-center gap-2 shadow-glow hover:opacity-90 transition-opacity"
+              >
+                <Sparkles size={14} /> Auto-Generate AI Captions
+              </button>
+            </div>
           )}
 
           {isTranscribing && (
@@ -396,7 +505,7 @@ export default function CaptionEditor() {
 
         {/* RIGHT COLUMN: Scrolling Subtitles List */}
         <div className="flex-1 p-6 overflow-y-auto flex flex-col gap-3 bg-[#060608]/40 border-l border-white/5">
-          {captionGroups.length === 0 ? (
+          {displayGroups.length === 0 ? (
             <div className="flex-1 flex flex-col items-center justify-center text-center text-white/20 gap-2">
               <Sparkles size={40} className="opacity-50 mb-2 text-white/30" />
               <h4 className="font-bold text-white/40">No Subtitles Generated</h4>
@@ -408,7 +517,7 @@ export default function CaptionEditor() {
             <div className="flex flex-col gap-2">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs text-white/40 font-semibold uppercase tracking-wider">
-                  Captions ({captionGroups.length})
+                  Captions ({displayGroups.length})
                 </span>
                 
                 {/* Add Caption trigger */}
@@ -422,7 +531,7 @@ export default function CaptionEditor() {
 
               {/* Caption Card list */}
               <div className="flex flex-col gap-2">
-                {captionGroups.map((group) => {
+                {displayGroups.map((group) => {
                   const isActive = activeGroup?.id === group.id;
                   const duration = group.endTime - group.startTime;
 
@@ -458,7 +567,25 @@ export default function CaptionEditor() {
                       <textarea
                         className="glass-input w-full p-2 text-xs h-12 leading-relaxed resize-none bg-black/20 focus:bg-black/50"
                         value={group.text}
-                        onChange={(e) => store.updateCaptionGroup(group.id, { text: e.target.value })}
+                        onChange={(e) => {
+                          if (store.showTranslated) {
+                            const newTranslatedWords = [...store.translatedWords];
+                            const wordsInGroup = group.words || [];
+                            const newTextWords = e.target.value.split(/\s+/);
+                            wordsInGroup.forEach((w, idx) => {
+                              const matchIdx = newTranslatedWords.findIndex(tw => Math.abs(tw.start - w.start) < 0.01);
+                              if (matchIdx !== -1 && newTextWords[idx]) {
+                                newTranslatedWords[matchIdx] = {
+                                  ...newTranslatedWords[matchIdx],
+                                  translated: newTextWords[idx]
+                                };
+                              }
+                            });
+                            store.setTranslatedWords(newTranslatedWords);
+                          } else {
+                            store.updateCaptionGroup(group.id, { text: e.target.value });
+                          }
+                        }}
                         placeholder="Write caption text..."
                       />
 
@@ -561,9 +688,21 @@ export default function CaptionEditor() {
               <RefreshCw size={20} />
               <h3 className="text-lg font-bold text-white">Re-Caption This Video?</h3>
             </div>
-            <p className="text-white/60 text-sm mb-6">
+            <p className="text-white/60 text-sm mb-4">
               All existing captions and manual edits will be deleted. The AI will re-transcribe the video from scratch and generate fresh captions.
             </p>
+            <div className="flex flex-col gap-1.5 mb-6">
+              <span className="text-[10px] text-white/50 uppercase font-semibold">Video Language</span>
+              <select
+                value={transcribeLanguage}
+                onChange={(e) => setTranscribeLanguage(e.target.value)}
+                className="w-full bg-[#12121a] border border-white/10 rounded-lg py-1.5 px-2 text-xs text-white/70 outline-none focus:border-[#00f5c4]/60 cursor-pointer"
+              >
+                <option value="auto">Auto Detect Language</option>
+                <option value="hi">Hindi (देवनागरी)</option>
+                <option value="en">English</option>
+              </select>
+            </div>
             <div className="flex justify-end gap-3">
               <button onClick={() => setConfirmReCaption(false)} className="px-4 py-2 text-sm font-medium text-white/60 hover:text-white transition-colors">Cancel</button>
               <button

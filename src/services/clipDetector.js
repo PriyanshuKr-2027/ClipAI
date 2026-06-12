@@ -5,25 +5,68 @@ import * as groq from './groq.js';
  * Orchestrates the entire clip detection and cutting pipeline.
  * @param {string} videoPath - Backend path of the source video
  * @param {Function} onStatus - Callback to update UI status messages
+ * @param {Object} options - Optional processing toggles
  * @returns {Promise<Object>} { clips, fullWords, language, videoInfo }
  */
-export async function generateClips(videoPath, onStatus) {
+export async function generateClips(videoPath, onStatus, options = {}) {
+  const { useDemucs = false, useDenoise = false, useSpacy = true } = options;
+
   onStatus("Getting video info...");
   const videoInfo = await api.getVideoInfo(videoPath);
 
   onStatus("Extracting audio track...");
-  const { audioUrl } = await api.extractAudio(videoPath);
+  const { audioPath, audioUrl } = await api.extractAudio(videoPath);
+  // Note: extract-audio now returns WAV, not MP3.
+  void audioUrl;
+
+  let processedAudioPath = audioPath;
+
+  if (useDemucs) {
+    onStatus("Separating vocals (Demucs)...");
+    const { vocalsPath } = await api.demucsAudio(audioPath);
+    processedAudioPath = vocalsPath;
+  }
+
+  if (useDenoise) {
+    onStatus("Reducing background noise...");
+    const { cleanAudioPath } = await api.denoiseAudio(processedAudioPath);
+    processedAudioPath = cleanAudioPath;
+  }
 
   onStatus("Transcribing with Whisper AI...");
-  const { words, text, language } = await groq.transcribeAudio(audioUrl);
+  const { words, text, language, backend } = await api.transcribeAudio(processedAudioPath);
+  onStatus(`Transcription complete (${backend})`);
 
-  const detectedLang = groq.detectLanguage(text);
+  let finalWords = words;
+  let finalLanguage = language;
+  let detectedLang = groq.detectLanguage(text);
+
+  if (detectedLang === 'ur' || language === 'ur') {
+    onStatus("Translating Urdu script to Hindi...");
+    try {
+      const wordsJsonPath = await api.saveWordsJson(words);
+      const transResult = await api.translateWords(wordsJsonPath, 'hi', 'ur');
+      finalWords = transResult.translatedWords || words;
+      finalLanguage = 'hi';
+      detectedLang = 'hi';
+    } catch (err) {
+      console.error("Auto Urdu-to-Hindi translation failed, falling back:", err);
+    }
+  }
+
+  if (useSpacy) {
+    onStatus("Applying sentence-aware caption breaks...");
+    const wordsJsonPath = await api.saveWordsJson(finalWords);
+    const { words: spacyWords } = await api.spacyBreaks(wordsJsonPath, finalLanguage);
+    finalWords = spacyWords;
+  }
+
   const stylePreset = detectedLang === 'hi' ? 'BoldDevanagari'
                     : detectedLang === 'mixed' ? 'HinglishFire'
                     : 'NeonPop';
 
-  onStatus("AI analyzing for viral moments...");
-  const transcriptStr = buildTimestampedTranscript(words);
+  onStatus("AI finding viral moments...");
+  const transcriptStr = buildTimestampedTranscript(finalWords);
   const suggestions = await groq.detectClips(transcriptStr, videoInfo.duration);
 
   const clips = [];
@@ -35,17 +78,25 @@ export async function generateClips(videoPath, onStatus) {
     // Generate the physical cut via backend
     const { clipPath, clipUrl } = await api.cutClip(videoPath, s.start, s.end, outputName);
     
-    // Filter out words belonging to this clip, and normalize their timestamps relative to the cut
-    const clipWords = words
+    const clipWords = finalWords
       .filter(w => w.start >= s.start && w.end <= s.end)
       .map(w => ({ 
         ...w, 
         start: +(w.start - s.start).toFixed(3), 
         end: +(w.end - s.start).toFixed(3) 
       }));
-      
-    // Grab thumbnail at 1s mark (or start of video if it's super short)
-    const { thumbUrl } = await api.getThumbnail(clipPath, 1);
+
+    let thumbUrl;
+    let thumbTimestamp = 1;
+    try {
+      onStatus(`Getting best thumbnail for clip ${i+1}...`);
+      const thumbResult = await api.getInsightFaceThumb(clipPath, 0, s.end - s.start);
+      thumbUrl = thumbResult.thumbUrl;
+      thumbTimestamp = thumbResult.timestamp;
+    } catch {
+      const fallback = await api.getThumbnail(clipPath, 1);
+      thumbUrl = fallback.thumbUrl;
+    }
     
     clips.push({
       id: outputName, 
@@ -59,14 +110,16 @@ export async function generateClips(videoPath, onStatus) {
       videoPath: clipPath, 
       videoUrl: clipUrl, 
       thumbUrl,
+      thumbTimestamp,
       words: clipWords, 
       language: detectedLang, 
-      stylePreset
+      stylePreset,
+      backend
     });
   }
   
   onStatus("Done!");
-  return { clips, fullWords: words, language: detectedLang, videoInfo };
+  return { clips, fullWords: finalWords, language: detectedLang, videoInfo };
 }
 
 /**

@@ -2,7 +2,9 @@ const express = require('express');
 const router = express.Router();
 const path = require('path');
 const fs = require('fs');
+const { spawn } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
+const ffmpegPath = require('ffmpeg-static');
 const ffmpegService = require('../services/ffmpeg');
 
 const tempDir = path.join(__dirname, '..', '..', 'temp');
@@ -13,6 +15,49 @@ function getTempPaths(extension) {
   const filename = `${id}.${extension}`;
   const filepath = path.join(tempDir, filename);
   return { id, filename, filepath };
+}
+
+function sanitizeOutputName(outputName) {
+  return outputName ? `_${outputName.replace(/[^a-z0-9]/gi, '_')}` : '';
+}
+
+function outputUrlFor(filename) {
+  return `http://localhost:3001/temp/${filename}`;
+}
+
+function escapeConcatPath(filePath) {
+  return filePath.replace(/\\/g, '/').replace(/'/g, "'\\''");
+}
+
+function normalizeSilenceRanges(silenceRanges) {
+  return [...silenceRanges]
+    .map((range) => ({
+      start: Math.max(0, parseFloat(range.start)),
+      end: Math.max(0, parseFloat(range.end))
+    }))
+    .filter((range) => Number.isFinite(range.start) && Number.isFinite(range.end) && range.end > range.start)
+    .sort((a, b) => a.start - b.start);
+}
+
+function invertSilenceRanges(silenceRanges, duration) {
+  const keepRanges = [];
+  let cursor = 0;
+
+  for (const range of silenceRanges) {
+    const start = Math.min(range.start, duration);
+    const end = Math.min(range.end, duration);
+
+    if (start > cursor) {
+      keepRanges.push({ start: cursor, end: start });
+    }
+    cursor = Math.max(cursor, end);
+  }
+
+  if (cursor < duration) {
+    keepRanges.push({ start: cursor, end: duration });
+  }
+
+  return keepRanges;
 }
 
 // POST /api/ffmpeg/info
@@ -35,7 +80,7 @@ router.post('/extract-audio', async (req, res) => {
     const { videoPath } = req.body;
     if (!videoPath) return res.status(400).json({ error: 'videoPath is required' });
     
-    const { filename, filepath } = getTempPaths('mp3');
+    const { filename, filepath } = getTempPaths('wav');
     await ffmpegService.extractAudio(videoPath, filepath);
     
     res.json({
@@ -44,6 +89,31 @@ router.post('/extract-audio', async (req, res) => {
     });
   } catch (err) {
     console.error('Extract audio error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/ffmpeg/composite
+router.post('/composite', async (req, res) => {
+  try {
+    const { baseVideoPath, captionVideoPath, outputName } = req.body;
+    if (!baseVideoPath || !captionVideoPath) {
+      return res.status(400).json({ error: 'baseVideoPath and captionVideoPath are required' });
+    }
+
+    const suffix = sanitizeOutputName(outputName);
+    const id = uuidv4();
+    const outputFilename = `${id}${suffix}.mp4`;
+    const outputPath = path.join(tempDir, outputFilename);
+
+    await ffmpegService.composite(baseVideoPath, captionVideoPath, outputPath);
+
+    res.json({
+      outputPath,
+      outputUrl: outputUrlFor(outputFilename)
+    });
+  } catch (err) {
+    console.error('Composite error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -226,7 +296,7 @@ router.post('/burn-captions', async (req, res) => {
 // POST /api/ffmpeg/reencode
 router.post('/reencode', async (req, res) => {
   try {
-    const { videoPath, crf, resolution } = req.body;
+    const { videoPath, crf, resolution, audioPath } = req.body;
     if (!videoPath) {
       return res.status(400).json({ error: 'videoPath is required' });
     }
@@ -246,7 +316,8 @@ router.post('/reencode', async (req, res) => {
         if (global.broadcastProgress) {
           global.broadcastProgress(jobId, percent);
         }
-      }
+      },
+      audioPath
     ).then(() => {
       if (global.broadcastDone) {
         global.broadcastDone(jobId, outputFilename);
@@ -260,6 +331,117 @@ router.post('/reencode', async (req, res) => {
     
   } catch (err) {
     console.error('Reencode error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/ffmpeg/remove-silence
+router.post('/remove-silence', async (req, res) => {
+  try {
+    const { videoPath, silenceRanges, outputName } = req.body;
+    if (!videoPath || !Array.isArray(silenceRanges)) {
+      return res.status(400).json({ error: 'videoPath and silenceRanges are required' });
+    }
+
+    const suffix = sanitizeOutputName(outputName);
+    const jobId = uuidv4();
+    const outputFilename = `${jobId}${suffix}.mp4`;
+    const outputPath = path.join(tempDir, outputFilename);
+    const segmentsPath = path.join(tempDir, `${jobId}_segments.txt`);
+
+    res.status(202).json({ jobId });
+
+    (async () => {
+      try {
+        const videoInfo = await ffmpegService.getVideoInfo(videoPath);
+        const duration = videoInfo.duration;
+        const sortedSilenceRanges = normalizeSilenceRanges(silenceRanges);
+        const keepRanges = invertSilenceRanges(sortedSilenceRanges, duration);
+
+        if (keepRanges.length === 0) {
+          throw new Error('No non-silent ranges remain after applying silenceRanges');
+        }
+
+        if (global.broadcastProgress) {
+          global.broadcastProgress(jobId, 5);
+        }
+
+        const escapedVideoPath = escapeConcatPath(videoPath);
+        const segmentLines = keepRanges.flatMap((range, index) => {
+          if (global.broadcastProgress) {
+            const percent = Math.min(50, Math.round(((index + 1) / keepRanges.length) * 50));
+            global.broadcastProgress(jobId, percent);
+          }
+
+          return [
+            `file '${escapedVideoPath}'`,
+            `inpoint ${range.start}`,
+            `outpoint ${range.end}`
+          ];
+        });
+
+        fs.writeFileSync(segmentsPath, `${segmentLines.join('\n')}\n`, 'utf8');
+
+        const proc = spawn(ffmpegPath, [
+          '-f', 'concat',
+          '-safe', '0',
+          '-i', segmentsPath,
+          '-c', 'copy',
+          outputPath
+        ]);
+
+        let stderr = '';
+
+        proc.stderr.on('data', (data) => {
+          stderr += data.toString();
+        });
+
+        proc.on('error', (err) => {
+          console.error(`Error spawning remove-silence job ${jobId}:`, err);
+          try {
+            if (fs.existsSync(segmentsPath)) fs.unlinkSync(segmentsPath);
+          } catch (_) {}
+
+          if (global.broadcastProgress) {
+            global.broadcastProgress(jobId, -1);
+          }
+        });
+
+        proc.on('close', (code) => {
+          try {
+            if (fs.existsSync(segmentsPath)) fs.unlinkSync(segmentsPath);
+          } catch (cleanupErr) {
+            console.error('Failed to cleanup segments file:', cleanupErr);
+          }
+
+          if (code !== 0) {
+            console.error(`Error processing remove-silence job ${jobId}:`, stderr.slice(-500));
+            if (global.broadcastProgress) {
+              global.broadcastProgress(jobId, -1);
+            }
+            return;
+          }
+
+          if (global.broadcastProgress) {
+            global.broadcastProgress(jobId, 100);
+          }
+          if (global.broadcastDone) {
+            global.broadcastDone(jobId, outputFilename);
+          }
+        });
+      } catch (err) {
+        console.error(`Error processing remove-silence job ${jobId}:`, err);
+        try {
+          if (fs.existsSync(segmentsPath)) fs.unlinkSync(segmentsPath);
+        } catch (_) {}
+
+        if (global.broadcastProgress) {
+          global.broadcastProgress(jobId, -1);
+        }
+      }
+    })();
+  } catch (err) {
+    console.error('Remove silence error:', err);
     res.status(500).json({ error: err.message });
   }
 });

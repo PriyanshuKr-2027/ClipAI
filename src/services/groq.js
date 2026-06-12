@@ -396,4 +396,3 @@ Respond ONLY with valid JSON, no markdown, no explanation outside the JSON:
     throw new Error("Failed to parse JSON technique recipe from model output.");
   }
 }
-

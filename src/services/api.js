@@ -19,6 +19,10 @@ ws.onmessage = (event) => {
       const callback = doneCallbacks.get(data.jobId);
       if (callback) callback(data.outputFilename);
     }
+    else if (data.type === 'error' && data.jobId) {
+      const callback = progressCallbacks.get(data.jobId);
+      if (callback) callback(-1, data.message);
+    }
   } catch (err) {
     console.error("WS parse error:", err);
   }
@@ -137,6 +141,47 @@ export async function getThumbnail(videoPath, timestamp = 1) {
   return data;
 }
 
+export async function demucsAudio(audioPath) {
+  const data = await postJson('/api/transcribe/demucs', { audioPath });
+  if (data.vocalsPath && !data.vocalsUrl) {
+    data.vocalsUrl = `${BASE}/temp/${data.vocalsPath.split(/[\\/]/).pop()}`;
+  }
+  return data;
+}
+
+export async function denoiseAudio(audioPath) {
+  const data = await postJson('/api/transcribe/denoise', { audioPath });
+  if (data.cleanAudioPath && !data.cleanAudioUrl) {
+    data.cleanAudioUrl = `${BASE}/temp/${data.cleanAudioPath.split(/[\\/]/).pop()}`;
+  }
+  return data;
+}
+
+export async function transcribeAudio(audioPath, language = 'auto') {
+  return postJson('/api/transcribe/whisper', { audioPath, language });
+}
+
+export async function saveWordsJson(words) {
+  const data = await postJson('/api/files/save-json', { data: words, prefix: 'words' });
+  return data.filePath || data.wordsJsonPath || data.path;
+}
+
+export async function spacyBreaks(wordsJsonPath, language = 'en') {
+  return postJson('/api/transcribe/spacy-breaks', { wordsJsonPath, language });
+}
+
+export async function translateWords(wordsJsonPath, targetLang, sourceLang = 'auto') {
+  return postJson('/api/transcribe/translate', { wordsJsonPath, targetLang, sourceLang });
+}
+
+export async function getInsightFaceThumb(videoPath, startTime, endTime) {
+  const data = await postJson('/api/thumb/insightface', { videoPath, startTime, endTime });
+  if (data.thumbPath && !data.thumbUrl) {
+    data.thumbUrl = `${BASE}/temp/${data.thumbPath.split(/[\\/]/).pop()}`;
+  }
+  return data;
+}
+
 /**
  * Hardcode captions into video asynchronously
  */
@@ -174,14 +219,12 @@ export async function burnCaptions(videoPath, assContent, outputName, settings, 
   });
 }
 
-/**
- * Reencode video asynchronously without captions
- */
-export async function reencodeVideo(videoPath, settings, onProgress) {
+export async function reencodeVideo(videoPath, settings, onProgress, audioPath = null) {
   const { jobId } = await postJson('/api/ffmpeg/reencode', { 
     videoPath, 
     crf: settings?.crf,
-    resolution: settings?.resolution
+    resolution: settings?.resolution,
+    audioPath
   });
 
   if (onProgress) {
@@ -285,3 +328,115 @@ export async function renderTransitions(payload, onProgress) {
     }
   }
 }
+
+// -------------------------------------------------------------
+// Audio & Silence Processing API Endpoints
+// -------------------------------------------------------------
+
+export async function analyzeBeats(audioPath) {
+  return postJson('/api/audio/beats', { audioPath });
+}
+
+export async function analyzeBeatsWithEnergy(audioPath) {
+  return postJson('/api/audio/beats-with-energy', { audioPath });
+}
+
+export async function analyzeSilence(audioPath, threshold, minDuration) {
+  return postJson('/api/audio/silence', { audioPath, threshold, minDuration });
+}
+
+export async function masterAudio(audioPath, targetLufs = -14) {
+  return postJson('/api/audio/pedalboard-master', { audioPath, targetLufs });
+}
+
+export async function removeSilence(videoPath, silenceRanges, outputName, onProgress) {
+  const { jobId } = await postJson('/api/ffmpeg/remove-silence', { 
+    videoPath, 
+    silenceRanges, 
+    outputName 
+  });
+
+  if (onProgress) {
+    onJobProgress(jobId, onProgress);
+  }
+
+  return new Promise((resolve, reject) => {
+    doneCallbacks.set(jobId, (outputFilename) => {
+      progressCallbacks.delete(jobId);
+      doneCallbacks.delete(jobId);
+      resolve({ 
+        outputPath: `${BASE}/temp/${outputFilename}`,
+        outputUrl: `${BASE}/temp/${outputFilename}` 
+      });
+    });
+    
+    const originalProgress = progressCallbacks.get(jobId);
+    progressCallbacks.set(jobId, (percent) => {
+      if (percent === -1) {
+        progressCallbacks.delete(jobId);
+        doneCallbacks.delete(jobId);
+        reject(new Error("Silence removal job failed. Check backend logs."));
+      } else if (originalProgress) {
+        originalProgress(percent);
+      }
+    });
+  });
+}
+
+export async function detectScenes(videoPath, threshold) {
+  return postJson('/api/scene/detect', { videoPath, threshold });
+}
+
+export async function getClipVisualScore(videoPath, timestamps) {
+  return postJson('/api/scene/clip-score', { videoPath, timestamps });
+}
+
+export async function renderRemotion(words, style, duration, videoWidth, videoHeight, onProgress) {
+  const { jobId } = await postJson('/api/remotion/render', {
+    words,
+    style,
+    duration,
+    videoWidth,
+    videoHeight
+  });
+
+  if (onProgress) {
+    onJobProgress(jobId, onProgress);
+  }
+
+  return new Promise((resolve, reject) => {
+    doneCallbacks.set(jobId, (outputFilename) => {
+      progressCallbacks.delete(jobId);
+      doneCallbacks.delete(jobId);
+      resolve({
+        outputPath: `${BASE}/temp/${outputFilename}`,
+        outputUrl: `${BASE}/temp/${outputFilename}`,
+        outputFilename
+      });
+    });
+
+    const originalProgress = progressCallbacks.get(jobId);
+    progressCallbacks.set(jobId, (percent, errorMsg) => {
+      if (percent === -1) {
+        progressCallbacks.delete(jobId);
+        doneCallbacks.delete(jobId);
+        reject(new Error(errorMsg || "Remotion render job failed. Check backend logs."));
+      } else if (originalProgress) {
+        originalProgress(percent);
+      }
+    });
+  });
+}
+
+export async function compositeVideo(baseVideoPath, captionVideoPath, outputName) {
+  return postJson('/api/ffmpeg/composite', { baseVideoPath, captionVideoPath, outputName });
+}
+
+export async function getSystemStatus() {
+  const res = await fetch(`${BASE}/api/status`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch system status: ${res.status}`);
+  }
+  return res.json();
+}
+

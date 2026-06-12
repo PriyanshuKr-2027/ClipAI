@@ -27,6 +27,41 @@ const initialState = {
   transcribeStatus: '',
   words: [],
   language: null,
+  translatedWords: null, // was [] originally
+  showTranslated: false,
+  transcriptionBackend: null,
+  transcribeStage: null,        // 'demucs' | 'denoise' | 'whisper' | 'spacy' | 'done'
+  audioPath: null,              // path to extracted audio file (WAV)
+
+  // Import tracking
+  importSource: null,           // 'file' | 'youtube' | 'instagram' | 'x' | 'playwright'
+
+  // Caption rendering mode
+  useRemotionRender: true,      // false = ASS fallback
+
+  // Translation
+  translateTargetLang: null,
+
+  // Audio analysis
+  beats: [],
+  bpm: null,
+  silenceRanges: [],
+  energyBySecond: [],
+
+  // Scene detection
+  scenes: [],
+
+  // Visual intelligence
+  compositeScores: {},          // { [clipId]: number }
+
+  // Remotion jobs
+  remotionJobs: {},             // { [jobId]: { status, percent, outputUrl } }
+
+  // B-Roll track
+  brollTrack: [],  // [{id, filePath, videoUrl, thumbUrl, start, end, duration, label}]
+
+  // Music track
+  musicTrack: [],  // [{id, filePath, audioUrl, start, end, duration, volume, isDucked}]
 
   // Captions
   captionGroups: [],
@@ -56,12 +91,18 @@ const initialState = {
     resolution: 'original',
     captions: 'burn',
     fontSize: 72,
+    platform: null,               // 'reels' | 'shorts' | 'tiktok' | 'linkedin' | 'twitter'
+    useRemotionCaptions: true,
+    usePedalboardMaster: false,
   },
   exportJobs: {},
 
   // History
   past: [],
   future: [],
+
+  // AI Prompt History (last 20 AI actions run in this session)
+  aiHistory: [], // [{ prompt, description, actions, timestamp }]
 };
 
 export const useEditorStore = create(
@@ -184,6 +225,17 @@ export const useEditorStore = create(
           words: state.words || [],
           captionGroups: state.captionGroups || [],
           language: state.language || null,
+          // ── Visual / Audio / Ingestion state ──────────────────────────────
+          beats: state.beats || [],
+          bpm: state.bpm || null,
+          silenceRanges: state.silenceRanges || [],
+          energyBySecond: state.energyBySecond || [],
+          scenes: state.scenes || [],
+          compositeScores: state.compositeScores || {},
+          translatedWords: state.translatedWords || null,
+          translateTargetLang: state.translateTargetLang || null,
+          audioPath: state.audioPath || null,
+          importSource: state.importSource || null,
           // ─────────────────────────────────────────────────────────────────
           created: state.created || Date.now(),
           lastEdited: Date.now(),
@@ -236,6 +288,20 @@ export const useEditorStore = create(
       state.transcribeStatus = '';
       state.words = proj.words || [];
       state.language = proj.language || null;
+
+      // Visual / Audio / Ingestion state
+      state.beats = proj.beats || [];
+      state.bpm = proj.bpm || null;
+      state.silenceRanges = proj.silenceRanges || [];
+      state.energyBySecond = proj.energyBySecond || [];
+      state.scenes = proj.scenes || [];
+      state.compositeScores = proj.compositeScores || {};
+      state.translatedWords = proj.translatedWords || null;
+      state.translateTargetLang = proj.translateTargetLang || null;
+      state.audioPath = proj.audioPath || null;
+      state.importSource = proj.importSource || null;
+      state.transcribeStage = null; // reset per session
+      state.remotionJobs = {}; // reset per session
 
       // Captions
       state.captionGroups = proj.captionGroups || [];
@@ -330,6 +396,54 @@ export const useEditorStore = create(
     setLanguage: (lang) => set(state => {
       state.language = lang;
     }),
+    setTranslatedWords: (words, lang) => set(state => {
+      state.translatedWords = words;
+      if (lang !== undefined) state.translateTargetLang = lang;
+    }),
+    setShowTranslated: (bool) => set(state => {
+      state.showTranslated = bool;
+    }),
+    setTranscriptionBackend: (backend) => set(state => {
+      state.transcriptionBackend = backend;
+    }),
+    setTranscribeStage: (stage) => set(state => {
+      state.transcribeStage = stage;
+    }),
+    setAudioPath: (path) => set(state => {
+      state.audioPath = path;
+    }),
+    setImportSource: (source) => set(state => {
+      state.importSource = source;
+    }),
+    setBeats: (beats, bpm) => set(state => {
+      state.beats = beats;
+      state.bpm = bpm;
+    }),
+    setSilenceRanges: (ranges) => set(state => {
+      state.silenceRanges = ranges;
+    }),
+    setEnergyBySecond: (energy) => set(state => {
+      state.energyBySecond = energy;
+    }),
+    setScenes: (scenes) => set(state => {
+      state.scenes = scenes;
+    }),
+    setCompositeScore: (clipId, score) => set(state => {
+      state.compositeScores[clipId] = score;
+    }),
+    setRemotionJob: (jobId, status) => set(state => {
+      if (!state.remotionJobs[jobId]) {
+        state.remotionJobs[jobId] = {};
+      }
+      if (typeof status === 'object') {
+        Object.assign(state.remotionJobs[jobId], status);
+      } else {
+        state.remotionJobs[jobId].status = status;
+      }
+    }),
+    toggleRemotionRender: () => set(state => {
+      state.useRemotionRender = !state.useRemotionRender;
+    }),
 
     // Captions
     buildCaptionGroups: () => set(state => {
@@ -397,6 +511,9 @@ export const useEditorStore = create(
     setGeneratedClips: (clips) => set(state => {
       state.generatedClips = clips;
     }),
+    updateClips: (clips) => set(state => {
+      state.generatedClips = clips;
+    }),
     setGeneratingClips: (bool, status) => set(state => {
       state.isGeneratingClips = bool;
       if (status !== undefined) state.clipStatus = status;
@@ -458,6 +575,54 @@ export const useEditorStore = create(
       }
       Object.assign(state.exportJobs[clipId], updates);
     }),
+
+    // B-Roll track
+    addBRollClip: (clip) => {
+      get().takeSnapshot();
+      set(state => { state.brollTrack.push(clip); });
+    },
+    updateBRollClip: (id, changes) => {
+      get().takeSnapshot();
+      set(state => {
+        const idx = state.brollTrack.findIndex(c => c.id === id);
+        if (idx !== -1) Object.assign(state.brollTrack[idx], changes);
+      });
+    },
+    removeBRollClip: (id) => {
+      get().takeSnapshot();
+      set(state => { state.brollTrack = state.brollTrack.filter(c => c.id !== id); });
+    },
+
+    // Music track
+    addMusicClip: (clip) => {
+      get().takeSnapshot();
+      set(state => { state.musicTrack.push(clip); });
+    },
+    updateMusicClip: (id, changes) => {
+      get().takeSnapshot();
+      set(state => {
+        const idx = state.musicTrack.findIndex(c => c.id === id);
+        if (idx !== -1) Object.assign(state.musicTrack[idx], changes);
+      });
+    },
+    removeMusicClip: (id) => {
+      get().takeSnapshot();
+      set(state => { state.musicTrack = state.musicTrack.filter(c => c.id !== id); });
+    },
+
+    // AI Prompt History
+    addAiHistory: (prompt, description, actions = []) => set(state => {
+      state.aiHistory.unshift({
+        id: crypto.randomUUID(),
+        prompt,
+        description,
+        actions,
+        timestamp: Date.now(),
+      });
+      // Keep last 20
+      if (state.aiHistory.length > 20) state.aiHistory.length = 20;
+    }),
+    clearAiHistory: () => set(state => { state.aiHistory = []; }),
 
     reset: () => set(initialState)
   }))

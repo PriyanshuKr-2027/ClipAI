@@ -2,8 +2,10 @@
 temp/
 .env.local
 .env.*
+!.env.example
 node_modules/
 dist/
+dist-remotion/
 build/
 .DS_Store
 .vscode/
@@ -15,3 +17,5 @@ package-lock.json
 /.parcel-cache
 /.pnp
 .pnp.js
+server/python/venv/
+server/python/models/

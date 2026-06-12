@@ -68,7 +68,7 @@ export default function CaptionOverlay({ captionGroups, currentTime = 0, stylePr
               isActive ? 'text-[#00f5c4]' : ''
             }`}
             style={{
-              fontFamily: "'Noto Sans Devanagari', sans-serif",
+              fontFamily: "'Noto Sans Devanagari', 'Noto Nastaliq Urdu', 'Noto Sans Arabic', sans-serif",
               fontSize: fontSizeStyle,
               color: isActive ? '#00f5c4' : baseColor,
             }}
